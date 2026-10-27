@@ -1,0 +1,433 @@
+---
+title: "MGSC 310 Final Group Project"
+output: html_document
+---
+
+#Libraries
+```{r}
+library("tidyverse")
+library(ROSE)
+library(pROC)
+library(rsample)
+library(caret)
+library(tree)
+library(randomForest)
+```
+
+
+## Data Cleaning
+
+```{r}
+cardio_well <- read.csv("datasets/CardioWell.csv", stringsAsFactors = TRUE)
+
+cardio_well %>% glimpse()
+
+colSums(is.na(cardio_well)) # Sums up number of missing variables for each variable
+
+cardio_well_clean <- 
+  cardio_well %>% 
+  drop_na(glucose, education, BPMeds, cigsPerDay, BMI, heartRate) %>% 
+  mutate(TenYearCHD = factor(TenYearCHD),
+         prevalentStroke = factor(prevalentStroke),
+         prevalentHyp = factor(prevalentHyp),
+         diabetes = factor(diabetes),
+         BPMeds = factor(BPMeds)) %>% 
+  select(-id)
+
+
+
+
+colSums(is.na(cardio_well_clean))
+
+cardio_well_clean %>% glimpse()
+
+table(cardio_well_clean$TenYearCHD)
+
+```
+
+
+## Modeling Processs
+
+Pre: Train Test Split of 75/25
+
+```{r}
+
+set.seed(310)
+cardio_split <- initial_split(cardio_well_clean, prop= 0.75)
+cardio_train <- training(cardio_split)
+cardio_test <- testing(cardio_split)
+```
+
+1) Baseline Model (simple tree based model)
+
+```{r}
+# First Tree Model with all variables except education
+cardio_tree <- tree(TenYearCHD ~ age + 
+                      sex + 
+                      is_smoking + 
+                      cigsPerDay + 
+                      BPMeds + 
+                      prevalentStroke + 
+                      prevalentHyp +
+                      diabetes +
+                      totChol+
+                      diaBP+
+                      sysBP+
+                      BMI+
+                      heartRate+
+                      glucose,
+                    data=cardio_train)
+
+plot(cardio_tree)
+text(cardio_tree, pretty = 0, cex=0.7)
+
+print(cardio_tree)
+
+
+pred_train <- predict(cardio_tree, newdata=cardio_train, type='class')
+pred_test <- predict(cardio_tree, newdata=cardio_test, type='class')
+
+pred_test %>% head()
+
+table(pred_train, cardio_train$TenYearCHD) 
+table(pred_test, cardio_test$TenYearCHD)
+```
+
+2) Second Model (bigger tree based model)
+```{r}
+
+cardio_tree_big <- tree(TenYearCHD ~ .,
+                        data=cardio_train,
+                        control = tree.control(nrow(cardio_train),
+                                               mindev=0.005))
+
+plot(cardio_tree_big)
+text(cardio_tree_big, pretty = 0, cex=0.7)
+
+summary(cardio_tree_big)
+
+pred_train_big <- predict(cardio_tree_big, newdata=cardio_train, type='class')
+pred_test_big <- predict(cardio_tree_big, newdata=cardio_test, type='class')
+
+
+table(pred_train_big, cardio_train$TenYearCHD) 
+table(pred_test_big, cardio_test$TenYearCHD)
+
+```
+
+
+3) Third Model (pruned tree from previous model)
+
+```{r}
+
+cardio_cv <- cv.tree(cardio_tree_big,
+                     FUN = prune.misclass)
+
+print(cardio_cv)
+
+cv.results <- data.frame(
+  size = cardio_cv$size,
+  error = cardio_cv$dev
+)
+
+print(cv.results)
+
+pruned_cardio_tree <- prune.misclass(cardio_tree_big, best=3)
+
+plot(pruned_cardio_tree)
+text(pruned_cardio_tree)
+
+pred_train_prune <- predict(pruned_cardio_tree, newdata=cardio_train, type='class')
+pred_test_prune <- predict(pruned_cardio_tree, newdata=cardio_test, type='class')
+
+table(pred_train_prune, cardio_train$TenYearCHD) 
+table(pred_test_prune, cardio_test$TenYearCHD)
+
+
+```
+
+4) ROSE Upsampling
+```{r}
+cardio_rose <-  ROSE(TenYearCHD ~ .,
+                     data = cardio_well_clean,
+                     N = 4000,
+                     p = 0.4, 
+                     seed = 1)$data
+
+table(cardio_rose$TenYearCHD)
+
+set.seed(310)
+cardio_rose_split <- initial_split(cardio_rose, prop=0.75)
+cardio_rose_train <- training(cardio_rose_split)
+cardio_rose_test  <- testing(cardio_rose_split)
+
+table(cardio_rose_train$TenYearCHD)
+table(cardio_rose_test$TenYearCHD)
+```
+
+
+5) Fourth Model (Random Forest with Upsampled Data)
+
+```{r}
+rf_cardio <- randomForest(TenYearCHD ~ age+ 
+                    sex + 
+                    is_smoking + 
+                    cigsPerDay + 
+                    BPMeds + 
+                    prevalentStroke + 
+                    prevalentHyp +
+                    diabetes +
+                    totChol+
+                    diaBP+
+                    sysBP+
+                    BMI+
+                    heartRate+
+                    glucose,
+                  data=cardio_rose_train,
+                  ntree = 50,
+                  mtry = 3,
+                  importance = TRUE)
+
+
+plot(rf_cardio)       
+
+pred_rf_cardio_train <- predict(rf_cardio, newdata = cardio_rose_train, type = 'class')
+pred_rf_cardio_test <- predict(rf_cardio, newdata = cardio_rose_test, type = 'class')
+
+table(pred_rf_cardio_train, cardio_rose_train$TenYearCHD)
+table(pred_rf_cardio_test, cardio_rose_test$TenYearCHD)
+
+```
+
+6) Fifth Model (Adding Interactions and Polynomials)
+
+```{r}
+data_interactions_poly <- cardio_rose_train %>% 
+  mutate(age_cigsPerDay = age * cigsPerDay,
+         age_glucose = age * glucose,
+         sysBPsquared = sysBP * sysBP)
+
+data_test_interactions_poly <- cardio_rose_test %>% 
+  mutate(age_cigsPerDay = age * cigsPerDay,
+         age_glucose = age * glucose,
+         sysBPsquared = sysBP * sysBP)
+
+
+cardio_tree_interactions <- tree(TenYearCHD ~ age+ 
+                                   sex + 
+                                   is_smoking + 
+                                   cigsPerDay + 
+                                   BPMeds + 
+                                   prevalentStroke + 
+                                   prevalentHyp +
+                                   diabetes +
+                                   totChol+
+                                   diaBP+
+                                   sysBP+
+                                   BMI+
+                                   heartRate+
+                                   glucose + 
+                                   age_cigsPerDay +
+                                   age_glucose + 
+                                   sysBPsquared,
+                                 data=data_interactions_poly)
+
+plot(cardio_tree_interactions)
+text(cardio_tree_interactions)
+
+interaction_pred_train <- predict(cardio_tree_interactions, newdata=data_interactions_poly, type='class')
+
+interaction_pred_test <- predict(cardio_tree_interactions, newdata = data_test_interactions_poly, type='class')
+
+table(interaction_pred_train, data=data_interactions_poly$TenYearCHD)
+table(interaction_pred_test, data=data_test_interactions_poly$TenYearCHD)
+```
+
+7) Final Model (Pruned Big Tree with Upsampled Data)
+
+```{r}
+cardio_rose_tree_big <- tree(TenYearCHD ~ age+ 
+                               sex + 
+                               is_smoking + 
+                               cigsPerDay + 
+                               BPMeds + 
+                               prevalentStroke + 
+                               prevalentHyp +
+                               diabetes +
+                               totChol+
+                               diaBP+
+                               sysBP+
+                               BMI+
+                               heartRate+
+                               glucose,
+                             data=cardio_rose_train,
+                             control = tree.control(nrow(cardio_rose_train),
+                                                    mindev=0.005))
+
+plot(cardio_rose_tree_big)
+text(cardio_rose_tree_big)
+
+cardio_rose_tree_big_train <- predict(cardio_rose_tree_big, newdata=cardio_rose_train, type='class')
+cardio_rose_tree_big_test  <- predict(cardio_rose_tree_big, newdata=cardio_rose_test, type='class')
+
+table(cardio_rose_tree_big_train, cardio_rose_train$TenYearCHD)
+table(cardio_rose_tree_big_test, cardio_rose_test$TenYearCHD)
+
+rose_big_cv <- cv.tree(cardio_rose_tree_big, FUN = prune.misclass)
+
+
+print(rose_big_cv)
+
+cv.results <- data.frame(
+  size = rose_big_cv$size,
+  error = rose_big_cv$dev
+)
+
+print(cv.results)
+
+pruned_cardio_rose_tree_big <- prune.misclass(cardio_rose_tree_big, best=9)
+
+plot(pruned_cardio_rose_tree_big)
+text(pruned_cardio_rose_tree_big)
+
+pruned_cardio_rose_tree_big_train <- predict(pruned_cardio_rose_tree_big, newdata=cardio_rose_train, type='class')
+pruned_cardio_rose_tree_big_test  <- predict(pruned_cardio_rose_tree_big, newdata=cardio_rose_test, type='class')
+
+table(pruned_cardio_rose_tree_big_train, cardio_rose_train$TenYearCHD)
+table(pruned_cardio_rose_tree_big_test, cardio_rose_test$TenYearCHD)
+
+
+```
+8) Final Model Metrics
+
+```{r}
+accuracy = (1527 + 670) / (1527 + 670 + 489 + 314)
+precision = (1527) / (1527 + 314)
+recall = (670) / (670 + 489)
+f1 = (precision * recall) / (precision + recall)
+sensitivity = 1527 / (1527 + 489)
+specificity = 670 / (670 + 314)
+
+print(accuracy)
+print(precision)
+print(recall)
+print(f1)
+print(sensitivity)
+print(specificity)
+
+accuracy2 = (492 + 207) / (492 + 207 + 112 + 189)
+precision2 = (492) / (492 + 112)
+recall2 = (207) / (207 + 189)
+f12 = (precision * recall) / (precision + recall)
+sensitivity2 = (492) / (492 + 189)
+specificity2 = (207) / (207 + 112)
+
+print(accuracy2)
+print(precision2)
+print(recall2)
+print(f12)
+print(sensitivity2)
+print(specificity2)
+
+pred_probs <- predict(pruned_cardio_rose_tree_big, newdata = cardio_rose_train)[, "1"]
+pred_probs_test <- predict(pruned_cardio_rose_tree_big, newdata = cardio_rose_test)[, "1"]
+
+true_TenYear <- cardio_rose_train$TenYearCHD
+roc_obj <- roc(true_TenYear, pred_probs)
+print(roc_obj)
+auc(roc_obj)
+
+true_TenYear_test <- cardio_rose_test$TenYearCHD
+roc_obj_test <- roc(true_TenYear_test, pred_probs_test)
+print(roc_obj_test)
+auc(roc_obj_test)
+
+plot(roc_obj, col="blue", main="ROC Curve", print.thres=c(0.01,0.03,0.1,0.5,0.8))
+plot(roc_obj_test, col="blue", main="ROC Curve", print.thres=c(0.01,0.03,0.1,0.5,0.8))
+
+ggplot(cardio_well_clean, aes(x = TenYearCHD, y = age, fill = TenYearCHD)) +
+  geom_boxplot() +
+  labs(title = "Age Distribution by 10-Year CHD Status",
+       x = "10-Year CHD",
+       y = "Age") +
+  theme_minimal()
+```
+
+
+# Outcome distribution
+```{r}
+  ggplot(cardio_well_clean,aes(x = factor(TenYearCHD))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "CHD Outcome Distribution", x = "TenYearCHD", y = "Count") +
+  theme_minimal()
+```
+
+# BMI by CHD outcome
+```{r}s
+cardio_well_clean %>%
+  group_by(TenYearCHD) %>%
+  summarise(avg_BMI = mean(BMI, na.rm = TRUE)) %>%
+  ggplot(aes(x = factor(TenYearCHD), y = avg_BMI, fill = factor(TenYearCHD))) +
+  geom_col() +
+  labs(title = "Average BMI by CHD Outcome", x = "TenYearCHD", y = "Average BMI") +
+  theme_minimal()
+```
+
+# Smoking vs CHD
+```{r}
+cardio_well_clean %>%
+  group_by(is_smoking, TenYearCHD) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = is_smoking, y = count, fill = TenYearCHD)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of CHD by Smoking Status", y = "Proportion") +
+  theme_minimal()
+```
+
+# Logistic regression model
+```{r}
+logit <- glm(TenYearCHD ~ BPMeds + prevalentStroke + prevalentHyp + diabetes + is_smoking,
+             data = cardio_train, family = binomial)
+summary(logit)
+
+logit_prob <- predict(logit, newdata = cardio_test, type = "response")
+logit_pred <- ifelse(logit_prob > 0.5, 1, 0)
+```
+
+# Confusion matrix
+```{r}
+cm <- confusionMatrix(as.factor(logit_pred), as.factor(cardio_test$TenYearCHD), positive = "1")
+print(cm)
+```
+
+# ROC curve and AUC
+```{r}
+roc_logit <- roc(cardio_test$TenYearCHD, logit_prob)
+plot(roc_logit, col = "blue", main = "ROC Curve - Logistic Regression")
+auc_logit <- auc(roc_logit)
+print(auc_logit)
+
+metrics <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall (Sensitivity)", "Specificity", "AUC"),
+  Value = c(
+    cm$overall["Accuracy"],
+    cm$byClass["Precision"],
+    cm$byClass["Sensitivity"],
+    cm$byClass["Specificity"],
+    auc_logit
+  )
+)
+print(metrics)
+```
+
+
+
+
+
+
+
+
+
+
+
